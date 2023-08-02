@@ -5,6 +5,8 @@ import java.util.List;
 import java.util.UUID;
 
 import com.shoppingcart.orderservice.dto.InventoryResponse;
+import org.springframework.cloud.sleuth.Span;
+import org.springframework.cloud.sleuth.Tracer;
 import org.springframework.stereotype.Service;
 
 import com.shoppingcart.orderservice.dto.OrderLineItemsDto;
@@ -22,8 +24,9 @@ public class OrderService {
     
     private final OrderRepository orderRepository;
     private final WebClient.Builder webClientBuilder;
+    private final Tracer tracer;
 
-    public void saveOrder(OrderRequest orderRequest) {
+    public String saveOrder(OrderRequest orderRequest) {
         Order order = new Order();
         order.setOrderNumber(UUID.randomUUID().toString());
         List<OrderLineItems> orderLineItems = orderRequest.getOrderLineItemsDtoList().stream().map(orderLineItem -> maptoDto(orderLineItem)).toList();
@@ -34,20 +37,28 @@ public class OrderService {
                 .toList();
 
 
-        // call inventory api to verify stock is present
-        InventoryResponse[] inventoryResponsesArray = webClientBuilder.build().get()
-                        .uri("http://inventory-service/api/inventory",
-                                uriBuilder -> uriBuilder.queryParam("skuCode",skuCodes).build() )
-                        .retrieve()
-                        .bodyToMono(InventoryResponse[].class)
-                        .block();
+        Span inventoyServicelookup = tracer.nextSpan().name("InventoryServiceLookUp");
+        try(Tracer.SpanInScope spanInScope= tracer.withSpan(inventoyServicelookup.start())){
 
-        boolean allProductsInStock = Arrays.stream(inventoryResponsesArray).allMatch(inventoryResponse -> inventoryResponse.isInStock() );
+            // call inventory api to verify stock is present
+            InventoryResponse[] inventoryResponsesArray = webClientBuilder.build().get()
+                    .uri("http://inventory-service/api/inventory",
+                            uriBuilder -> uriBuilder.queryParam("skuCode",skuCodes).build() )
+                    .retrieve()
+                    .bodyToMono(InventoryResponse[].class)
+                    .block();
 
-        if(allProductsInStock){
-            orderRepository.save(order);
-        } else {
-            throw new IllegalArgumentException("Product is out of stock please try again later");
+            boolean allProductsInStock = Arrays.stream(inventoryResponsesArray).allMatch(inventoryResponse -> inventoryResponse.isInStock() );
+
+            if(allProductsInStock){
+                orderRepository.save(order);
+                return  "order placed sucessfully";
+            } else {
+                throw new IllegalArgumentException("Product is out of stock please try again later");
+            }
+
+        }finally {
+            inventoyServicelookup.end();
         }
     }
 
